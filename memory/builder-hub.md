@@ -1,26 +1,32 @@
-Analyze this repo as the public downloadable version of EternalNotes.
+\# Builder Hub
 
 
 
-Do not edit yet.
+\## What it is
+
+The public website where people can view and download my free tools.
 
 
 
-Find:
+\## Repo
 
-\- auth/signup code
-
-\- billing/Stripe code
-
-\- private notes/data risks
-
-\- .env or secret risks
-
-\- setup friction
-
-\- README problems
+https://github.com/William-Papps/builder-hub
 
 
 
-Return the safest cleanup plan in small commits.
+\## Current goal
+
+Show EternalNotes first, then add more tools later.
+
+
+
+\## Rules
+
+\- Public website only.
+
+\- No private admin controls.
+
+\- No private notes.
+
+\- No Ruflo controls.
 

@@ -10,7 +10,7 @@ A local-first RAG note-taking system using Markdown notes.
 
 \## Current goal
 
-Turn it into a clean free open-source tool people can download and run locally.
+Split EternalNotes into a private personal version and a clean public open-source version.
 
 
 
@@ -32,9 +32,9 @@ https://github.com/William-Papps/obsidian-like-rag-system.git
 
 \- Public repo must contain sample notes only.
 
-\- No accounts.
+\- Public repo should have no accounts.
 
-\- No billing.
+\- Public repo should have no billing.
 
-\- Simple install.
+\- Public repo should be simple to install.
 
