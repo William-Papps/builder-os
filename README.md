@@ -1,3 +1,33 @@
+# Builder OS
+
+Private AI project command center. Plan software ideas through conversation, generate SDLC specs, create locked task packets, and dispatch to AI agents via sandbox.
+
+## API Key Setup
+
+Builder OS uses OpenAI and Anthropic Claude for the planner conversation.
+
+1. Copy the example env file:
+   ```
+   copy .env.example .env.local
+   ```
+
+2. Fill in your keys in `.env.local`:
+   ```
+   OPENAI_API_KEY=sk-...
+   ANTHROPIC_API_KEY=sk-ant-...
+   ```
+
+3. Restart the dev server — env changes are not hot-reloaded.
+
+**Provider routing:**
+- `Brainstorm` mode → OpenAI `gpt-4o-mini` (faster, cheaper)
+- `SDLC`, `Task Packet`, `Review` modes → Claude `claude-sonnet-4-6` (more capable)
+- Falls back to whichever key is available if only one is configured
+
+**API keys are never exposed to the browser.** All provider calls are server-side only (`app/api/planner-chat/route.ts`).
+
+---
+
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
 ## Getting Started

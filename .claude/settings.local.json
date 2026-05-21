@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(Get-ChildItem \"C:\\\\Users\\\\willi\\\\Projects\\\\builder-os\" -Recurse -File | Where-Object { $_.FullName -notmatch \"node_modules|\\\\.git|\\\\.next\" } | Select-Object FullName | Format-Table -AutoSize)",
+      "PowerShell(Get-ChildItem \"C:\\\\Users\\\\willi\\\\Projects\\\\builder-os\" -Recurse -File | Where-Object { $_.FullName -notmatch \"node_modules|\\\\.git|\\\\.next|\\\\.claude\" } | Select-Object -ExpandProperty FullName)",
+      "Bash(npm run *)",
+      "Bash(git add *)",
+      "Bash(git push *)"
+    ]
+  },
+  "enableAllProjectMcpServers": true,
+  "enabledMcpjsonServers": [
+    "ruflo"
+  ]
+}

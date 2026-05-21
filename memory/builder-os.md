@@ -6,38 +6,43 @@ Never public-facing. No accounts, no external APIs yet.
 
 ## Repo
 Local path: C:\Users\willi\Projects\builder-os
-Private — never push to a public repo.
-
-## Purpose
-- Plan and track all project work
-- Generate safe prompts for Claude / Codex / Ruflo
-- Store project memory in Markdown files
-- Manage what eventually gets pushed to Builder Hub
-- Later: run Claude/Ruflo agents safely from here
+GitHub: https://github.com/William-Papps/builder-os (private)
 
 ## Tech Stack
-- Next.js 16 (app router)
+- Next.js 16 (app router, Turbopack)
 - Tailwind CSS v4
 - TypeScript
-- No database yet — Markdown files only
-- No auth yet
+- No database — data/projects.ts and memory/*.md as source of truth
+- No auth
 
-## Current Goal
-Build a usable MVP private dashboard.
+## Purpose
+- View all connected projects in one place
+- Track active tasks per project
+- Generate safe AI prompts pre-filled with project context
+- Store project memory in Markdown
+- Follow the safe workflow for every change
+- Later: run Claude/Ruflo/Codex agents from here
 
 ## Pages
-- / — Dashboard with projects, workflow, safety rules
-- /projects — All 4 projects with details
-- /projects/eternalnotes — EternalNotes detail page
+- / — Dashboard with stats, project grid, tasks, safety rules
+- /projects — List of all connected projects (from data/projects.ts)
+- /projects/[id] — Dynamic project detail page
+- /projects/eternalnotes — EternalNotes overview (links to both public/private)
 - /tasks — Grouped tasks per project
-- /prompts — Copyable prompt cards
+- /prompts — 6 prompt templates with project selector
+- /workflow — 10-step safe workflow with rules
+
+## Project Registry
+All project data lives in data/projects.ts.
+To add a project: add an entry to the PROJECTS array.
+IDs: builder-os, builder-hub, eternalnotes-public, eternalnotes-private
 
 ## Rules
 - Private only
-- No login needed
+- No login
 - No external API calls yet
 - No Ruflo live execution yet
 - No autonomous agents yet
 
 ## Status
-MVP complete. Memory files in place.
+MVP complete. Project registry in place. All 4 projects connected.
