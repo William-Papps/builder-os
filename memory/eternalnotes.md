@@ -2,39 +2,53 @@
 
 
 
-\## What it is
+\## Purpose
 
-A local-first RAG note-taking system using Markdown notes.
-
-
-
-\## Current goal
-
-Split EternalNotes into a private personal version and a clean public open-source version.
+A free local-first RAG note system using Markdown notes.
 
 
 
-\## Private repo
+\## Current Direction
 
-https://github.com/William-Papps/private-eternalnotes.git
+Split the project into:
+
+\- private personal version
+
+\- public open-source version
 
 
 
-\## Public repo
+\## Private Repo
 
-https://github.com/William-Papps/obsidian-like-rag-system.git
+https://github.com/William-Papps/private-eternalnotes
+
+
+
+\## Public Repo
+
+https://github.com/William-Papps/obsidian-like-rag-system
+
+
+
+\## Current Tasks
+
+\- Remove accounts
+
+\- Remove billing
+
+\- Add sample notes
+
+\- Simplify installation
+
+\- Rewrite README
 
 
 
 \## Rules
 
-\- Never expose private notes.
+\- Never expose private notes
 
-\- Public repo must contain sample notes only.
+\- Public repo must contain sample notes only
 
-\- Public repo should have no accounts.
-
-\- Public repo should have no billing.
-
-\- Public repo should be simple to install.
+\- Keep public setup simple
 

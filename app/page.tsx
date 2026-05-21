@@ -10,6 +10,9 @@ export default function Home() {
         and manage what gets pushed publicly.
       </p>
       <div style={{ display: "flex", gap: "16px", marginTop: "40px" }}>
+<a href="/projects/eternalnotes" style={{ border: "1px solid #27272a", padding: "24px", borderRadius: "16px", color: "white" }}>
+  EternalNotes Project
+</a>
         <a href="/tasks" style={{ border: "1px solid #27272a", padding: "24px", borderRadius: "16px", color: "white" }}>
           Tasks
         </a>
