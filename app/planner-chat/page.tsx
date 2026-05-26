@@ -79,7 +79,19 @@ interface ParsedFinalPlan {
   raw: string;
 }
 
-type PacketStatus = "draft" | "needs-review" | "approved";
+type PacketStatus = "draft" | "needs-review" | "approved" | "sandbox-created";
+
+type SandboxReviewStatus = "sandbox-ready" | "claude-running" | "awaiting-review" | "review-complete";
+
+interface ParsedSandboxSummary {
+  filesChanged: string[];
+  architectureDecisions: string[];
+  buildResult: "PASS" | "FAIL" | "unknown";
+  errors: string[];
+  risks: string[];
+  nextTask: string;
+  raw: string;
+}
 
 // ── Plan parser ───────────────────────────────────────────────────────────────
 
@@ -237,6 +249,35 @@ function parseFinalPlan(raw: string): ParsedFinalPlan | null {
   } catch {
     return null;
   }
+}
+
+// ── Sandbox summary parser ────────────────────────────────────────────────────
+
+function parseSandboxSummary(text: string): ParsedSandboxSummary | null {
+  if (!text.trim()) return null;
+  const upper = text.toUpperCase();
+  const hasAny = upper.includes("FILES CHANGED") || upper.includes("BUILD RESULT") || upper.includes("RISKS") || upper.includes("NEXT TASK") || upper.includes("NEXT RECOMMENDED");
+  if (!hasAny) return null;
+
+  const extractLines = (re: RegExp): string[] => {
+    const m = text.match(re);
+    if (!m) return [];
+    return m[1].split("\n").map((l) => l.replace(/^[-•*\d.]+\s*/, "").trim()).filter(Boolean);
+  };
+  const extractText = (re: RegExp): string => {
+    const m = text.match(re);
+    return m ? m[1].replace(/^[-•*\s]+/, "").trim() : "";
+  };
+
+  const filesChanged = extractLines(/FILES CHANGED[:\s]*\n([\s\S]*?)(?=\n##|\nARCHITECTURE|\nBUILD|\nERRORS|\nRISKS|\nNEXT|$)/i);
+  const architectureDecisions = extractLines(/ARCHITECTURE DECISIONS?[:\s]*\n([\s\S]*?)(?=\n##|\nFILES|\nBUILD|\nERRORS|\nRISKS|\nNEXT|$)/i);
+  const buildLine = extractText(/BUILD RESULT[:\s]*([\s\S]*?)(?=\n##|\nFILES|\nARCH|\nERRORS|\nRISKS|\nNEXT|$)/i);
+  const buildResult: "PASS" | "FAIL" | "unknown" = /\bPASS\b/i.test(buildLine) ? "PASS" : /\bFAIL\b/i.test(buildLine) ? "FAIL" : "unknown";
+  const errors = extractLines(/ERRORS?[:\s]*\n([\s\S]*?)(?=\n##|\nFILES|\nBUILD|\nARCH|\nRISKS|\nNEXT|$)/i);
+  const risks = extractLines(/RISKS?[:\s]*\n([\s\S]*?)(?=\n##|\nFILES|\nBUILD|\nARCH|\nERRORS|\nNEXT|$)/i);
+  const nextTask = extractText(/NEXT(?:\s+RECOMMENDED)?\s+TASK[:\s]*([\s\S]*?)(?=\n##|\nFILES|\nBUILD|\nARCH|\nERRORS|\nRISKS|$)/i);
+
+  return { filesChanged, architectureDecisions, buildResult, errors, risks, nextTask, raw: text };
 }
 
 // ── Local fallback responses ───────────────────────────────────────────────────
@@ -682,17 +723,45 @@ const STATUS_LABEL: Record<PacketStatus, string> = {
   "draft": "Draft",
   "needs-review": "Needs Review",
   "approved": "Approved — Ready for Execution",
+  "sandbox-created": "Sandbox Created — Ready for Claude",
 };
 
 const STATUS_COLOR: Record<PacketStatus, string> = {
   "draft": "#333",
   "needs-review": "#fb923c",
   "approved": "#4ade80",
+  "sandbox-created": "#c084fc",
+};
+
+interface SandboxInfo {
+  path: string;
+  copiedCount?: number;
+  error?: string;
+}
+
+const REVIEW_STATUS_LABELS: Record<SandboxReviewStatus, string> = {
+  "sandbox-ready": "Sandbox Ready",
+  "claude-running": "Claude Running",
+  "awaiting-review": "Awaiting Review",
+  "review-complete": "Review Complete",
+};
+
+const REVIEW_STATUS_ORDER: SandboxReviewStatus[] = ["sandbox-ready", "claude-running", "awaiting-review", "review-complete"];
+
+const REVIEW_STATUS_COLOR: Record<SandboxReviewStatus, string> = {
+  "sandbox-ready": "#60a5fa",
+  "claude-running": "#fb923c",
+  "awaiting-review": "#fbbf24",
+  "review-complete": "#4ade80",
 };
 
 function TaskPacketCard({
   packet, idx, status, projectName,
   onReview, onApprove, onRevoke,
+  sandboxInfo, sandboxLoading, repoPath, onRepoPathChange,
+  onCreateSandbox, onDeleteSandbox,
+  reviewStatus, onReviewStatus,
+  summaryInput, onSummaryInputChange, onSummarySubmit, parsedSummary,
 }: {
   packet: ParsedTaskPacket;
   idx: number;
@@ -701,13 +770,32 @@ function TaskPacketCard({
   onReview: () => void;
   onApprove: () => void;
   onRevoke: () => void;
+  sandboxInfo?: SandboxInfo;
+  sandboxLoading?: boolean;
+  repoPath: string;
+  onRepoPathChange: (v: string) => void;
+  onCreateSandbox: () => void;
+  onDeleteSandbox: () => void;
+  reviewStatus: SandboxReviewStatus;
+  onReviewStatus: (s: SandboxReviewStatus) => void;
+  summaryInput: string;
+  onSummaryInputChange: (v: string) => void;
+  onSummarySubmit: () => void;
+  parsedSummary?: ParsedSandboxSummary;
 }) {
   const [copied, setCopied] = useState(false);
+  const [copiedCmd, setCopiedCmd] = useState<string | null>(null);
 
   const copy = async () => {
     await navigator.clipboard.writeText(packet.executionPrompt);
     setCopied(true);
     setTimeout(() => setCopied(false), 2200);
+  };
+
+  const copyText = async (text: string, key: string) => {
+    await navigator.clipboard.writeText(text);
+    setCopiedCmd(key);
+    setTimeout(() => setCopiedCmd(null), 2000);
   };
 
   const pid = packet.id || `PKT-${idx + 1}`;
@@ -816,6 +904,207 @@ function TaskPacketCard({
     );
   }
 
+  // ── SANDBOX CREATED — READY FOR CLAUDE ───────────────────────────────────
+  if (status === "sandbox-created" && sandboxInfo) {
+    const cdCmd = `cd "${sandboxInfo.path}"`;
+    const rColor = REVIEW_STATUS_COLOR[reviewStatus];
+    const HELPER_CMDS = [
+      { label: "npm run dev", key: "dev" },
+      { label: "npm run build", key: "build" },
+      { label: "git status", key: "gstatus" },
+      { label: "git diff --stat", key: "gdiff" },
+    ];
+    return (
+      <div style={{ borderRadius: 10, border: "1px solid #4c1d95", background: "rgba(76,29,149,0.04)", overflow: "hidden", marginBottom: 12 }}>
+
+        {/* Header */}
+        <div style={{ padding: "10px 14px", borderBottom: "1px solid #4c1d95", background: "rgba(76,29,149,0.1)", display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          <span style={{ fontSize: 11, fontWeight: 800, color: "#a78bfa", fontFamily: "monospace" }}>{pid}</span>
+          <span style={{ fontSize: 11, padding: "1px 8px", borderRadius: 12, border: "1px solid #4c1d9544", background: "rgba(76,29,149,0.15)", color: "#c084fc", fontWeight: 700 }}>
+            ✓ {STATUS_LABEL["sandbox-created"]}
+          </span>
+          {sandboxInfo.copiedCount !== undefined && (
+            <span style={{ fontSize: 11, color: "#555" }}>{sandboxInfo.copiedCount} files</span>
+          )}
+          <button onClick={onRevoke} style={{ marginLeft: "auto", fontSize: 11, color: "#333", background: "none", border: "none", cursor: "pointer" }}>← Back to Draft</button>
+        </div>
+
+        {/* Safety reminder */}
+        <div style={{ padding: "9px 14px", borderBottom: "1px solid #0d0d0d", background: "rgba(76,29,149,0.06)", borderLeft: "3px solid #6d28d9" }}>
+          <p style={{ fontSize: 12, color: "#a78bfa", margin: 0, lineHeight: 1.5 }}>
+            Sandbox execution is <strong>disposable</strong> until manually applied to the real repo. Your real files are untouched.
+          </p>
+        </div>
+
+        {/* Review status track */}
+        <div style={{ padding: "10px 14px", borderBottom: "1px solid #0d0d0d", display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+          <span style={{ fontSize: 10, fontWeight: 700, color: "#333", textTransform: "uppercase", letterSpacing: "0.07em", marginRight: 4 }}>Status:</span>
+          {REVIEW_STATUS_ORDER.map((s, i) => {
+            const sc = REVIEW_STATUS_COLOR[s];
+            const isActive = s === reviewStatus;
+            return (
+              <span key={s} style={{ display: "flex", alignItems: "center" }}>
+                <button onClick={() => onReviewStatus(s)} style={{ fontSize: 11, padding: "2px 10px", borderRadius: 20, cursor: "pointer", border: isActive ? `1px solid ${sc}` : "1px solid #1a1a1a", background: isActive ? `${sc}22` : "#090909", color: isActive ? sc : "#333", fontWeight: isActive ? 700 : 400 }}>
+                  {REVIEW_STATUS_LABELS[s]}
+                </button>
+                {i < REVIEW_STATUS_ORDER.length - 1 && <span style={{ fontSize: 10, color: "#1e1e1e", margin: "0 2px" }}>→</span>}
+              </span>
+            );
+          })}
+        </div>
+
+        {/* Open sandbox in Claude Code */}
+        <div style={{ padding: "12px 14px", borderBottom: "1px solid #0d0d0d" }}>
+          <p style={{ fontSize: 10, fontWeight: 700, color: "#a78bfa", textTransform: "uppercase", letterSpacing: "0.07em", margin: "0 0 10px" }}>Open Sandbox in Claude Code</p>
+
+          {/* Sandbox path */}
+          <p style={{ fontSize: 10, fontWeight: 600, color: "#444", margin: "0 0 4px" }}>Sandbox Path</p>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, background: "#040404", border: "1px solid #1a1a1a", borderRadius: 8, padding: "8px 12px", marginBottom: 10 }}>
+            <code style={{ fontSize: 12, color: "#c084fc", fontFamily: "monospace", flex: 1, wordBreak: "break-all" }}>{sandboxInfo.path}</code>
+            <button onClick={() => copyText(sandboxInfo.path, "path")} style={{ fontSize: 11, color: copiedCmd === "path" ? "#c084fc" : "#444", background: "none", border: "none", cursor: "pointer", whiteSpace: "nowrap" }}>
+              {copiedCmd === "path" ? "Copied ✓" : "Copy"}
+            </button>
+          </div>
+
+          {/* Step-by-step launch commands */}
+          {[
+            { step: "1", label: "Open PowerShell and navigate to sandbox", cmd: cdCmd, key: "cd" },
+            { step: "2", label: "Start Claude Code", cmd: "claude", key: "claude" },
+            { step: "3", label: "Paste the execution prompt below when Claude opens", cmd: null, key: null },
+          ].map(({ step, label, cmd, key }) => (
+            <div key={step} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+              <span style={{ fontSize: 12, fontWeight: 700, color: "#a78bfa", minWidth: 20 }}>{step}.</span>
+              {cmd && key ? (
+                <div style={{ display: "flex", alignItems: "center", flex: 1, gap: 8, background: "#040404", border: "1px solid #1a1a1a", borderRadius: 8, padding: "7px 12px" }}>
+                  <code style={{ fontSize: 13, color: "#e2d9f3", fontFamily: "monospace", flex: 1 }}>{cmd}</code>
+                  <button onClick={() => copyText(cmd, key)} style={{ fontSize: 11, color: copiedCmd === key ? "#c084fc" : "#444", background: "none", border: "none", cursor: "pointer", whiteSpace: "nowrap" }}>
+                    {copiedCmd === key ? "Copied ✓" : "Copy"}
+                  </button>
+                </div>
+              ) : (
+                <span style={{ fontSize: 12, color: "#555" }}>{label}</span>
+              )}
+            </div>
+          ))}
+
+          <p style={{ fontSize: 11, color: "#333", margin: "6px 0 0", lineHeight: 1.5 }}>
+            <code style={{ fontFamily: "monospace", fontSize: 11, color: "#555" }}>TASK_PACKET.md</code> and <code style={{ fontFamily: "monospace", fontSize: 11, color: "#555" }}>RUN_CLAUDE.ps1</code> are inside the sandbox root.
+          </p>
+        </div>
+
+        {/* Execution prompt */}
+        <div style={{ padding: "12px 14px", borderBottom: "1px solid #0d0d0d" }}>
+          <p style={{ fontSize: 10, fontWeight: 700, color: "#2d6a4f", textTransform: "uppercase", letterSpacing: "0.07em", margin: "0 0 8px" }}>Execution Prompt — paste into Claude Code</p>
+          <pre style={{ fontSize: 12, color: "#666", lineHeight: 1.65, background: "#040404", border: "1px solid #111", borderRadius: 8, padding: "12px 14px", margin: "0 0 8px", whiteSpace: "pre-wrap", wordBreak: "break-word", fontFamily: "monospace" }}>
+            {packet.executionPrompt}
+          </pre>
+          <button onClick={copy}
+            style={{ padding: "8px 18px", borderRadius: 8, cursor: "pointer", border: copied ? "1px solid #4ade80" : "1px solid #064e3b", background: copied ? "rgba(6,78,59,0.25)" : "rgba(6,78,59,0.12)", fontSize: 12, fontWeight: 700, color: copied ? "#4ade80" : "#34d399" }}>
+            {copied ? "Copied ✓" : "Copy Execution Prompt →"}
+          </button>
+        </div>
+
+        {/* Helper commands */}
+        <div style={{ padding: "12px 14px", borderBottom: "1px solid #0d0d0d" }}>
+          <p style={{ fontSize: 10, fontWeight: 700, color: "#555", textTransform: "uppercase", letterSpacing: "0.07em", margin: "0 0 8px" }}>Helper Commands (run inside sandbox)</p>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+            {HELPER_CMDS.map(({ label, key }) => (
+              <div key={key} style={{ display: "flex", alignItems: "center", gap: 6, background: "#040404", border: "1px solid #1a1a1a", borderRadius: 8, padding: "7px 10px" }}>
+                <code style={{ fontSize: 12, color: "#888", fontFamily: "monospace", flex: 1 }}>{label}</code>
+                <button onClick={() => copyText(label, key)} style={{ fontSize: 10, color: copiedCmd === key ? "#4ade80" : "#333", background: "none", border: "none", cursor: "pointer", whiteSpace: "nowrap" }}>
+                  {copiedCmd === key ? "✓" : "Copy"}
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* After Claude finishes */}
+        <div style={{ padding: "12px 14px", borderBottom: "1px solid #0d0d0d" }}>
+          <p style={{ fontSize: 10, fontWeight: 700, color: "#fbbf24", textTransform: "uppercase", letterSpacing: "0.07em", margin: "0 0 8px" }}>After Claude Finishes</p>
+          {[
+            { n: 1, text: "Run npm run build — must pass before anything is accepted" },
+            { n: 2, text: "Run git status — see what changed inside the sandbox" },
+            { n: 3, text: "Review the diff: git diff --stat" },
+            { n: 4, text: "Fill in SANDBOX_SUMMARY_TEMPLATE.md — Claude can do this for you" },
+            { n: 5, text: "Paste the summary into Builder OS below to log the review" },
+          ].map(({ n, text }) => (
+            <p key={n} style={{ fontSize: 12, color: "#666", margin: "0 0 5px" }}>{n}. {text}</p>
+          ))}
+        </div>
+
+        {/* Paste Claude summary */}
+        <div style={{ padding: "12px 14px", borderBottom: "1px solid #0d0d0d" }}>
+          <p style={{ fontSize: 10, fontWeight: 700, color: "#555", textTransform: "uppercase", letterSpacing: "0.07em", margin: "0 0 8px" }}>Paste Claude Summary</p>
+          <textarea
+            value={summaryInput}
+            onChange={(e) => onSummaryInputChange(e.target.value)}
+            placeholder={"Paste SANDBOX_SUMMARY_TEMPLATE.md contents here after Claude finishes…\n\nFILES CHANGED:\n- ...\n\nBUILD RESULT:\nPASS\n\nRISKS:\n- ..."}
+            rows={7}
+            style={{ width: "100%", padding: "10px 12px", borderRadius: 8, border: "1px solid #1e1e1e", background: "#060606", color: "#b0b0b0", fontSize: 12, lineHeight: 1.65, fontFamily: "monospace", outline: "none", resize: "vertical", boxSizing: "border-box" }}
+          />
+          <button onClick={onSummarySubmit} disabled={!summaryInput.trim()}
+            style={{ marginTop: 8, padding: "8px 18px", borderRadius: 8, cursor: summaryInput.trim() ? "pointer" : "not-allowed", border: "1px solid #1e3a8a", background: "rgba(30,58,138,0.2)", fontSize: 12, fontWeight: 700, color: summaryInput.trim() ? "#60a5fa" : "#333" }}>
+            Parse Summary →
+          </button>
+        </div>
+
+        {/* Parsed summary cards */}
+        {parsedSummary && (
+          <div style={{ padding: "12px 14px", borderBottom: "1px solid #0d0d0d" }}>
+            <p style={{ fontSize: 10, fontWeight: 700, color: "#60a5fa", textTransform: "uppercase", letterSpacing: "0.07em", margin: "0 0 10px" }}>Review Summary</p>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
+              {/* Build result */}
+              <div style={{ padding: "10px 12px", borderRadius: 8, border: parsedSummary.buildResult === "PASS" ? "1px solid #064e3b" : parsedSummary.buildResult === "FAIL" ? "1px solid #7f1d1d" : "1px solid #1a1a1a", background: parsedSummary.buildResult === "PASS" ? "rgba(6,78,59,0.1)" : parsedSummary.buildResult === "FAIL" ? "rgba(127,29,29,0.08)" : "#070707" }}>
+                <p style={{ fontSize: 10, fontWeight: 700, color: "#333", textTransform: "uppercase", letterSpacing: "0.07em", margin: "0 0 4px" }}>Build Result</p>
+                <p style={{ fontSize: 18, fontWeight: 800, margin: 0, color: parsedSummary.buildResult === "PASS" ? "#4ade80" : parsedSummary.buildResult === "FAIL" ? "#f87171" : "#555" }}>
+                  {parsedSummary.buildResult === "unknown" ? "—" : parsedSummary.buildResult}
+                </p>
+              </div>
+              {/* Next task */}
+              <div style={{ padding: "10px 12px", borderRadius: 8, border: "1px solid #1a1a1a", background: "#070707" }}>
+                <p style={{ fontSize: 10, fontWeight: 700, color: "#333", textTransform: "uppercase", letterSpacing: "0.07em", margin: "0 0 4px" }}>Next Recommended Task</p>
+                <p style={{ fontSize: 12, color: "#888", margin: 0, lineHeight: 1.4 }}>{parsedSummary.nextTask || "—"}</p>
+              </div>
+            </div>
+            {parsedSummary.filesChanged.length > 0 && (
+              <div style={{ padding: "10px 12px", borderRadius: 8, border: "1px solid #1a1a1a", background: "#070707", marginBottom: 8 }}>
+                <p style={{ fontSize: 10, fontWeight: 700, color: "#333", textTransform: "uppercase", letterSpacing: "0.07em", margin: "0 0 6px" }}>Files Changed</p>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
+                  {parsedSummary.filesChanged.map((f, i) => <code key={i} style={{ fontSize: 11, padding: "2px 8px", borderRadius: 6, border: "1px solid #1e1e1e", background: "#060606", color: "#60a5fa", fontFamily: "monospace" }}>{f}</code>)}
+                </div>
+              </div>
+            )}
+            {parsedSummary.risks.length > 0 && (
+              <div style={{ padding: "10px 12px", borderRadius: 8, border: "1px solid #7f1d1d33", background: "rgba(127,29,29,0.04)", marginBottom: 8 }}>
+                <p style={{ fontSize: 10, fontWeight: 700, color: "#7f1d1d", textTransform: "uppercase", letterSpacing: "0.07em", margin: "0 0 6px" }}>Risks</p>
+                {parsedSummary.risks.map((r, i) => <p key={i} style={{ fontSize: 12, color: "#f87171", margin: "0 0 3px" }}>· {r}</p>)}
+              </div>
+            )}
+            {parsedSummary.errors.length > 0 && (
+              <div style={{ padding: "10px 12px", borderRadius: 8, border: "1px solid #7f1d1d33", background: "rgba(127,29,29,0.04)" }}>
+                <p style={{ fontSize: 10, fontWeight: 700, color: "#7f1d1d", textTransform: "uppercase", letterSpacing: "0.07em", margin: "0 0 6px" }}>Errors</p>
+                {parsedSummary.errors.map((e, i) => <p key={i} style={{ fontSize: 12, color: "#ef4444", margin: "0 0 3px", fontFamily: "monospace" }}>{e}</p>)}
+              </div>
+            )}
+            <button onClick={() => onReviewStatus("review-complete")} style={{ marginTop: 10, padding: "8px 18px", borderRadius: 8, cursor: "pointer", border: "1px solid #064e3b", background: "rgba(6,78,59,0.2)", fontSize: 12, fontWeight: 700, color: "#4ade80" }}>
+              Mark Review Complete ✓
+            </button>
+          </div>
+        )}
+
+        {/* Delete sandbox */}
+        <div style={{ padding: "10px 14px", display: "flex", gap: 8, alignItems: "center" }}>
+          <span style={{ fontSize: 11, color: "#2a2a2a", flex: 1 }}>Sandbox is disposable — delete it once you&apos;ve applied changes to the real repo.</span>
+          <button onClick={onDeleteSandbox}
+            style={{ padding: "7px 14px", borderRadius: 8, cursor: "pointer", border: "1px solid #7f1d1d44", background: "rgba(127,29,29,0.06)", fontSize: 12, color: "#ef4444", whiteSpace: "nowrap" }}>
+            Delete Sandbox
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   // ── APPROVED — READY FOR EXECUTION ────────────────────────────────────────
   return (
     <div style={{ borderRadius: 10, border: "1px solid #064e3b", background: "rgba(6,78,59,0.04)", overflow: "hidden", marginBottom: 12 }}>
@@ -863,6 +1152,33 @@ function TaskPacketCard({
         </div>
       </div>
 
+      {/* Sandbox creation */}
+      <div style={{ padding: "12px 14px", borderBottom: "1px solid #0d0d0d", background: "rgba(76,29,149,0.04)" }}>
+        <p style={{ fontSize: 10, fontWeight: 700, color: "#a78bfa", textTransform: "uppercase", letterSpacing: "0.07em", margin: "0 0 8px" }}>Create Sandbox (Recommended)</p>
+        <p style={{ fontSize: 12, color: "#555", margin: "0 0 10px", lineHeight: 1.5 }}>
+          Enter the path to your local repo. Builder OS will copy it into a disposable sandbox so Claude Code never touches your real files.
+        </p>
+        {sandboxInfo?.error && (
+          <div style={{ padding: "8px 12px", borderRadius: 8, border: "1px solid #7f1d1d44", background: "rgba(127,29,29,0.08)", marginBottom: 8 }}>
+            <p style={{ fontSize: 12, color: "#f87171", margin: 0 }}>{sandboxInfo.error}</p>
+          </div>
+        )}
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <input
+            type="text"
+            value={repoPath}
+            onChange={(e) => onRepoPathChange(e.target.value)}
+            placeholder="C:\Users\you\Projects\my-app"
+            disabled={sandboxLoading}
+            style={{ flex: 1, minWidth: 200, padding: "8px 12px", borderRadius: 8, border: "1px solid #2a2a2a", background: sandboxLoading ? "#060606" : "#090909", color: "#d4d4d4", fontSize: 13, fontFamily: "monospace", outline: "none", opacity: sandboxLoading ? 0.5 : 1 }}
+          />
+          <button onClick={onCreateSandbox} disabled={!repoPath.trim() || sandboxLoading}
+            style={{ padding: "8px 16px", borderRadius: 8, cursor: !repoPath.trim() || sandboxLoading ? "not-allowed" : "pointer", border: "1px solid #4c1d95", background: !repoPath.trim() || sandboxLoading ? "#0a0a0a" : "rgba(76,29,149,0.3)", fontSize: 13, fontWeight: 700, color: !repoPath.trim() || sandboxLoading ? "#333" : "#a78bfa", whiteSpace: "nowrap" }}>
+            {sandboxLoading ? "Creating…" : "Create Sandbox →"}
+          </button>
+        </div>
+      </div>
+
       {/* Execution prompt */}
       <div style={{ padding: "12px 14px", borderBottom: "1px solid #0d0d0d" }}>
         <p style={{ fontSize: 10, fontWeight: 700, color: "#2d6a4f", textTransform: "uppercase", letterSpacing: "0.07em", margin: "0 0 8px" }}>Execution Prompt</p>
@@ -879,9 +1195,9 @@ function TaskPacketCard({
         </button>
         <p style={{ fontSize: 10, fontWeight: 700, color: "#333", textTransform: "uppercase", letterSpacing: "0.07em", margin: "0 0 8px" }}>Next Steps</p>
         {[
-          "Copy the execution prompt above",
+          "Create a sandbox above (recommended) — or skip and run in your real repo",
           `Open Claude Code inside: ${projectName || "your target repo"}`,
-          "Paste the prompt and run — stay within scope",
+          "Paste the execution prompt and run — stay within scope",
           "Review the diff carefully before approving any commits",
           "Do NOT push — human review required before merge",
         ].map((step, i) => (
@@ -894,11 +1210,23 @@ function TaskPacketCard({
 
 // ── Final plan view ───────────────────────────────────────────────────────────
 
-function FinalPlanView({ plan, packetStatuses, onPacketStatus, projectName }: {
+function FinalPlanView({ plan, packetStatuses, onPacketStatus, projectName, sandboxInfos, sandboxLoadingSet, repoInputs, onRepoInputChange, onCreateSandbox, onDeleteSandbox, reviewStatuses, onReviewStatus, summaryInputs, onSummaryInputChange, onSummarySubmit, parsedSummaries }: {
   plan: ParsedFinalPlan;
   packetStatuses: Record<number, PacketStatus>;
   onPacketStatus: (idx: number, status: PacketStatus) => void;
   projectName: string;
+  sandboxInfos: Record<number, SandboxInfo>;
+  sandboxLoadingSet: Record<number, boolean>;
+  repoInputs: Record<number, string>;
+  onRepoInputChange: (idx: number, v: string) => void;
+  onCreateSandbox: (idx: number) => void;
+  onDeleteSandbox: (idx: number) => void;
+  reviewStatuses: Record<number, SandboxReviewStatus>;
+  onReviewStatus: (idx: number, s: SandboxReviewStatus) => void;
+  summaryInputs: Record<number, string>;
+  onSummaryInputChange: (idx: number, v: string) => void;
+  onSummarySubmit: (idx: number) => void;
+  parsedSummaries: Record<number, ParsedSandboxSummary>;
 }) {
   return (
     <div>
@@ -988,6 +1316,18 @@ function FinalPlanView({ plan, packetStatuses, onPacketStatus, projectName }: {
               onReview={() => onPacketStatus(i, "needs-review")}
               onApprove={() => onPacketStatus(i, "approved")}
               onRevoke={() => onPacketStatus(i, "draft")}
+              sandboxInfo={sandboxInfos[i]}
+              sandboxLoading={sandboxLoadingSet[i] ?? false}
+              repoPath={repoInputs[i] ?? ""}
+              onRepoPathChange={(v) => onRepoInputChange(i, v)}
+              onCreateSandbox={() => onCreateSandbox(i)}
+              onDeleteSandbox={() => onDeleteSandbox(i)}
+              reviewStatus={reviewStatuses[i] ?? "sandbox-ready"}
+              onReviewStatus={(s) => onReviewStatus(i, s)}
+              summaryInput={summaryInputs[i] ?? ""}
+              onSummaryInputChange={(v) => onSummaryInputChange(i, v)}
+              onSummarySubmit={() => onSummarySubmit(i)}
+              parsedSummary={parsedSummaries[i]}
             />
           ))}
         </PlanSec>
@@ -1053,6 +1393,12 @@ export default function PlannerChatPage() {
   const [initialIdea, setInitialIdea] = useState("");
   const [lastError, setLastError] = useState<string | null>(null);
   const [packetStatuses, setPacketStatuses] = useState<Record<number, PacketStatus>>({});
+  const [sandboxInfos, setSandboxInfos] = useState<Record<number, SandboxInfo>>({});
+  const [sandboxLoadingSet, setSandboxLoadingSet] = useState<Record<number, boolean>>({});
+  const [repoInputs, setRepoInputs] = useState<Record<number, string>>({});
+  const [reviewStatuses, setReviewStatuses] = useState<Record<number, SandboxReviewStatus>>({});
+  const [summaryInputs, setSummaryInputs] = useState<Record<number, string>>({});
+  const [parsedSummaries, setParsedSummaries] = useState<Record<number, ParsedSandboxSummary>>({});
 
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -1244,10 +1590,77 @@ Risk level: ${scopeLock.riskLevel} — ${scopeLock.riskReason}`;
     setPacketStatuses((prev) => ({ ...prev, [idx]: status }));
   }, []);
 
+  const updateRepoInput = useCallback((idx: number, v: string) => {
+    setRepoInputs((prev) => ({ ...prev, [idx]: v }));
+  }, []);
+
+  const createSandboxForPacket = useCallback(async (idx: number, packet: ParsedTaskPacket) => {
+    const repoPath = repoInputs[idx]?.trim() ?? "";
+    if (!repoPath) return;
+    setSandboxLoadingSet((prev) => ({ ...prev, [idx]: true }));
+    setSandboxInfos((prev) => { const n = { ...prev }; delete n[idx]; return n; });
+    try {
+      const packetId = packet.id || `PKT-${idx + 1}`;
+      const taskPacketContent = `# Task Packet: ${packetId}\n\n${packet.executionPrompt}`;
+      const res = await fetch("/api/create-sandbox", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ taskPacketId: packetId, repoPath, taskPacketContent }),
+      });
+      const data = await res.json() as { success?: boolean; sandboxPath?: string; copied?: number; errors?: string[]; error?: string };
+      if (data.success && data.sandboxPath) {
+        setSandboxInfos((prev) => ({ ...prev, [idx]: { path: data.sandboxPath!, copiedCount: data.copied } }));
+        setPacketStatuses((prev) => ({ ...prev, [idx]: "sandbox-created" }));
+      } else {
+        const errMsg = data.errors?.[0] ?? data.error ?? "Sandbox creation failed";
+        setSandboxInfos((prev) => ({ ...prev, [idx]: { path: "", error: errMsg } }));
+      }
+    } catch (e) {
+      setSandboxInfos((prev) => ({ ...prev, [idx]: { path: "", error: e instanceof Error ? e.message : "Network error" } }));
+    } finally {
+      setSandboxLoadingSet((prev) => ({ ...prev, [idx]: false }));
+    }
+  }, [repoInputs]);
+
+  const deleteSandboxForPacket = useCallback(async (idx: number, packet: ParsedTaskPacket) => {
+    const packetId = packet.id || `PKT-${idx + 1}`;
+    try {
+      await fetch("/api/create-sandbox", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ taskPacketId: packetId, action: "delete" }),
+      });
+    } catch { /* ignore */ }
+    setSandboxInfos((prev) => { const n = { ...prev }; delete n[idx]; return n; });
+    setReviewStatuses((prev) => { const n = { ...prev }; delete n[idx]; return n; });
+    setSummaryInputs((prev) => { const n = { ...prev }; delete n[idx]; return n; });
+    setParsedSummaries((prev) => { const n = { ...prev }; delete n[idx]; return n; });
+    setPacketStatuses((prev) => ({ ...prev, [idx]: "approved" }));
+  }, []);
+
+  const updateReviewStatus = useCallback((idx: number, s: SandboxReviewStatus) => {
+    setReviewStatuses((prev) => ({ ...prev, [idx]: s }));
+  }, []);
+
+  const updateSummaryInput = useCallback((idx: number, v: string) => {
+    setSummaryInputs((prev) => ({ ...prev, [idx]: v }));
+  }, []);
+
+  const submitSummary = useCallback((idx: number) => {
+    const text = summaryInputs[idx] ?? "";
+    const parsed = parseSandboxSummary(text);
+    if (parsed) {
+      setParsedSummaries((prev) => ({ ...prev, [idx]: parsed }));
+      setReviewStatuses((prev) => ({ ...prev, [idx]: "awaiting-review" }));
+    }
+  }, [summaryInputs]);
+
   const reset = useCallback(() => {
     setStage("intake"); setMessages([]); setInput("");
     setReadyForFinalPlan(false); setMissingInfo([]); setConfidence(0);
     setScopeLock(null); setFinalPlanText(null); setPacketStatuses({});
+    setSandboxInfos({}); setSandboxLoadingSet({}); setRepoInputs({});
+    setReviewStatuses({}); setSummaryInputs({}); setParsedSummaries({});
     setLocalIdx(0); setInitialIdea(""); setLastError(null);
     textareaRef.current?.focus();
   }, []);
@@ -1376,6 +1789,18 @@ Risk level: ${scopeLock.riskLevel} — ${scopeLock.riskReason}`;
                 packetStatuses={packetStatuses}
                 onPacketStatus={updatePacketStatus}
                 projectName={scopeLock?.existingRepo ?? scopeLock?.projectName ?? ""}
+                sandboxInfos={sandboxInfos}
+                sandboxLoadingSet={sandboxLoadingSet}
+                repoInputs={repoInputs}
+                onRepoInputChange={updateRepoInput}
+                onCreateSandbox={(i) => createSandboxForPacket(i, parsedPlan.taskPackets[i])}
+                onDeleteSandbox={(i) => deleteSandboxForPacket(i, parsedPlan.taskPackets[i])}
+                reviewStatuses={reviewStatuses}
+                onReviewStatus={updateReviewStatus}
+                summaryInputs={summaryInputs}
+                onSummaryInputChange={updateSummaryInput}
+                onSummarySubmit={submitSummary}
+                parsedSummaries={parsedSummaries}
               />
             ) : (
               // Raw fallback if parser finds nothing to structure
